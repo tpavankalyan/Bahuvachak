@@ -27,7 +27,7 @@ if __name__ == "__main__":
     decoder_config = ParlerTTSDecoderConfig(
         vocab_size=encodec_vocab_size + 64,  # + 64 instead of +1 to have a multiple of 64
         max_position_embeddings=4096,  # 30 s = 2580
-        num_hidden_layers=24,
+        num_hidden_layers=12,
         ffn_dim=4096,
         num_attention_heads=16,
         layerdrop=0.0,

@@ -46,6 +46,8 @@ from accelerate import Accelerator, skip_first_batches
 from accelerate.utils import set_seed, AutocastKwargs, InitProcessGroupKwargs, TorchDynamoPlugin
 from accelerate.utils.memory import release_memory
 
+from IndicTransToolkit import IndicProcessor
+
 from parler_tts import (
     ParlerTTSConfig,
     ParlerTTSForConditionalGeneration,
@@ -241,6 +243,7 @@ def main():
         if data_args.description_column_name is not None:
             columns_to_keep["description_column_name"] = data_args.description_column_name
 
+
         if training_args.do_train:
             raw_datasets["train"] = load_multiple_datasets(
                 accelerator,
@@ -381,12 +384,15 @@ def main():
 
         # Preprocessing the dataset.
         # We need to tokenize the texts.
+
         def pass_through_processors(description, prompt):
             batch = {}
-
             batch["input_ids"] = description_tokenizer(description.strip())["input_ids"]
+            if model_args.prompt_tokenizer_name == "ai4bharat/indictrans2-en-indic-1B":
+                ip = IndicProcessor(inference=True)
+                # inlcude the language code in the config
+                prompt = ip.preprocess_batch([prompt.strip()], src_lang='hin_Deva', tgt_lang='hin_Deva')[0]
             batch["prompt_input_ids"] = prompt_tokenizer(prompt.strip())["input_ids"]
-
             return batch
 
         with accelerator.local_main_process_first():
