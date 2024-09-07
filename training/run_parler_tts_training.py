@@ -239,6 +239,7 @@ def main():
         columns_to_keep = {
             "target_audio_column_name": data_args.target_audio_column_name,
             "prompt_column_name": data_args.prompt_column_name,
+            "language_column_name": "language",
         }
         if data_args.description_column_name is not None:
             columns_to_keep["description_column_name"] = data_args.description_column_name
@@ -385,13 +386,13 @@ def main():
         # Preprocessing the dataset.
         # We need to tokenize the texts.
 
-        def pass_through_processors(description, prompt):
+        def pass_through_processors(description, prompt, language):
             batch = {}
             batch["input_ids"] = description_tokenizer(description.strip())["input_ids"]
             if model_args.prompt_tokenizer_name == "ai4bharat/indictrans2-en-indic-1B":
                 ip = IndicProcessor(inference=True)
                 # inlcude the language code in the config
-                prompt = ip.preprocess_batch([prompt.strip()], src_lang='hin_Deva', tgt_lang='hin_Deva')[0]
+                prompt = ip.preprocess_batch([prompt.strip()], src_lang=language, tgt_lang=language)[0]
             batch["prompt_input_ids"] = prompt_tokenizer(prompt.strip())["input_ids"]
             return batch
 
@@ -400,7 +401,7 @@ def main():
             vectorized_datasets = raw_datasets.map(
                 pass_through_processors,
                 remove_columns=next(iter(raw_datasets.values())).column_names,
-                input_columns=[description_column_name, prompt_column_name],
+                input_columns=[description_column_name, prompt_column_name, "language"],
                 num_proc=num_workers,
                 desc="preprocess datasets",
             )
