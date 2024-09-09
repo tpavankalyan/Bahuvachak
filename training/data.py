@@ -212,6 +212,8 @@ def load_multiple_datasets(
                 streaming=streaming,
                 **kwargs,
             )
+            new_column = [dataset_dict["config"]] * len(dataset)
+            dataset = dataset.add_column("language", new_column)
             dataset_features = dataset.features.keys()
 
             if sampling_rate is not None and audio_column_name is not None:

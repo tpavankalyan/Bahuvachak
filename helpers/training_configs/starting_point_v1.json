@@ -15,13 +15,13 @@
 
     "train_dataset_name": "Pavankalyan/Bahuvachak",
     "train_metadata_dataset_name": "Pavankalyan/Bahuvachak",
-    "train_dataset_config_name": "Hi",
+    "train_dataset_config_name": "hin_Deva",
     "train_split_name": "train",
 
     "eval_dataset_name": "Pavankalyan/Bahuvachak",
     "eval_metadata_dataset_name": "Pavankalyan/Bahuvachak",
-    "eval_dataset_config_name": "Hi",
-    "eval_split_name": "train",
+    "eval_dataset_config_name": "hin_Deva",
+    "eval_split_name": "val",
 
 
     "target_audio_column_name": "audio", 
