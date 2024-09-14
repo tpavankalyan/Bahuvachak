@@ -1798,8 +1798,8 @@ class ParlerTTSForCausalLM(ParlerTTSPreTrainedModel):
             # since encoder hidden states have concatenated to hidden states, take the last hidden states corresponding to labels
             logits = lm_logits[:, :, -labels.shape[1] :]
 
-            loss_fct = CrossEntropyLoss()
-            loss = torch.zeros([], device=self.device)
+            loss_fct = CrossEntropyLoss(reduction='none')
+            loss = None
 
             # (bsz, vocab_size, seq_len, num_codebooks), (bsz, seq_len, num_codebooks)
             labels = labels.masked_fill(labels == self.config.bos_token_id, -100)
@@ -1807,14 +1807,18 @@ class ParlerTTSForCausalLM(ParlerTTSPreTrainedModel):
             # we use every codebooks token AND one single EOS at the end of each codebooks
             mask = (input_ids.transpose(1, 2) != self.config.eos_token_id) & ((labels != -100))
 
+            bcz = logits.shape[0]
             # per codebook cross-entropy
             for codebook in range(self.config.num_codebooks):
-                codebook_logits = logits[:, codebook].contiguous().view(-1, logits.shape[-1])
-                codebook_mask = mask[..., codebook].contiguous().view(-1)
-                codebook_labels = labels[..., codebook].contiguous().view(-1)
+                codebook_logits = logits[:, codebook].contiguous().view(bcz, -1, logits.shape[-1])
+                codebook_mask = mask[..., codebook].contiguous().view(bcz, -1)
+                codebook_labels = labels[..., codebook].contiguous().view(bcz, -1)
 
                 codebook_loss = loss_fct(codebook_logits[codebook_mask], codebook_labels[codebook_mask])
-                loss += codebook_loss
+                if loss is None:
+                    loss = codebook_loss
+                else:
+                    loss += codebook_loss
 
             loss = loss / self.config.num_codebooks
 
