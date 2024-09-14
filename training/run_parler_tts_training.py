@@ -46,6 +46,10 @@ from accelerate import Accelerator, skip_first_batches
 from accelerate.utils import set_seed, AutocastKwargs, InitProcessGroupKwargs, TorchDynamoPlugin
 from accelerate.utils.memory import release_memory
 
+from pyannote.audio import Model as Model_SPK
+from pyannote.audio import Inference as Inf_SPK
+
+
 from IndicTransToolkit import IndicProcessor
 
 from parler_tts import (
@@ -197,6 +201,9 @@ def main():
     )
     sampling_rate = feature_extractor.sampling_rate
 
+    model_spk = Model_SPK.from_pretrained("pyannote/embedding")
+    speaker_embedding_model = Inf_SPK(model_spk, window="whole")
+
     # load prompt tokenizer
     prompt_tokenizer = AutoTokenizer.from_pretrained(
         model_args.prompt_tokenizer_name or model_args.description_tokenizer_name or model_args.model_name_or_path,
@@ -337,6 +344,8 @@ def main():
         attn_implementation=model_args.attn_implementation,
     )
 
+    model.resize_prompt_embeddings(len(prompt_tokenizer))
+
     # enable gradient checkpointing if necessary
     if training_args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
@@ -394,6 +403,7 @@ def main():
                 # inlcude the language code in the config
                 prompt = ip.preprocess_batch([prompt.strip()], src_lang=language, tgt_lang=language)[0]
             batch["prompt_input_ids"] = prompt_tokenizer(prompt.strip())["input_ids"]
+            batch["language"] = language
             return batch
 
         with accelerator.local_main_process_first():
@@ -431,6 +441,7 @@ def main():
         )
 
         def apply_audio_decoder(batch):
+            speaker_embedding_model.to(batch["input_values"].device)
             len_audio = batch.pop("len_audio")
             audio_decoder.to(batch["input_values"].device).eval()
             with torch.no_grad():
@@ -443,6 +454,15 @@ def main():
             # if `pad_to_max_length`, the maximum corresponding audio length of the current batch is max_duration*sampling_rate
             max_length = len_audio.max() if padding != "max_length" else max_target_length
             output["ratio"] = torch.ones_like(len_audio) * labels.shape[-1] / max_length
+
+            #output["speaker_embeddings"] = torch.rand(len(len_audio), 512).to(batch["input_values"].device)
+            speaker_embeddings = []
+            for audio in batch["input_values"]:
+                embedding = speaker_embedding_model({"waveform": audio, "sample_rate": sampling_rate})  # assuming 16kHz sampling rate
+                speaker_embeddings.append(embedding)  # Store as numpy for compatibility
+
+            # Move speaker embeddings to the correct device
+            output["speaker_embeddings"] = torch.tensor(speaker_embeddings).to(batch["input_values"].device)
             return output
 
         # (1, codebooks, seq_len) where seq_len=1
@@ -497,6 +517,7 @@ def main():
 
             all_generated_labels = []
             all_lens = []
+            all_speaker_emb = []
             if start_step < total_inference_steps:
                 for i, batch in enumerate(tqdm(data_loader, disable=not accelerator.is_local_main_process)):
                     cur_step = start_step + i
@@ -508,15 +529,17 @@ def main():
                         lab = generate_labels["labels"].cpu().transpose(1, 2).to(torch.int16)
                         rat = generate_labels["ratio"].cpu().squeeze(1)
                         lens = generate_labels["len_audio"].cpu().squeeze(1)
+                        spk_emb = generate_labels["speaker_embeddings"].cpu()
                         lab = [l[:, : int(ratio * length)] for (l, ratio, length) in zip(lab, rat, lens)]
 
                         all_generated_labels.extend(lab)
                         all_lens.extend(lens)
+                        all_speaker_emb.extend(spk_emb)
 
                         if ((cur_step + 1) % data_args.save_codec_steps == 0) or (
                             cur_step == total_inference_steps - 1
                         ):
-                            tmp_labels = Dataset.from_dict({"labels": all_generated_labels, "target_length": all_lens})
+                            tmp_labels = Dataset.from_dict({"labels": all_generated_labels, "target_length": all_lens, "spk_emb": all_speaker_emb})
                             tmp_labels = tmp_labels.map(
                                 postprocess_dataset,
                                 num_proc=data_args.preprocessing_num_workers,  # this one is resource consuming if many processor.
@@ -528,11 +551,12 @@ def main():
                             )
                             all_generated_labels = []
                             all_lens = []
+                            all_speaker_emb = []
 
                 accelerator.wait_for_everyone()
 
             if accelerator.is_main_process and len(all_generated_labels) > 0:
-                tmp_labels = Dataset.from_dict({"labels": all_generated_labels, "target_length": all_lens})
+                tmp_labels = Dataset.from_dict({"labels": all_generated_labels, "target_length": all_lens, "spk_emb": all_speaker_emb})
                 tmp_labels = tmp_labels.map(
                     postprocess_dataset,
                     num_proc=data_args.preprocessing_num_workers,  # this one is resource consuming if many processor.
@@ -542,6 +566,7 @@ def main():
                 save_codec_checkpoint(os.path.join(data_args.temporary_save_to_disk, split), tmp_labels, cur_step)
                 all_generated_labels = []
                 all_lens = []
+                all_speaker_emb = []
             accelerator.wait_for_everyone()
 
             del all_generated_labels
@@ -555,7 +580,7 @@ def main():
                 vectorized_datasets[split] = concatenate_datasets([vectorized_datasets[split], tmp_labels], axis=1)
 
         accelerator.free_memory()
-        del generate_labels, all_lens
+        del generate_labels, all_lens, all_speaker_emb
 
         with accelerator.local_main_process_first():
             # NOTE: filtering is done at the end because in the `datasets` library, caching audio files is done after most operations
