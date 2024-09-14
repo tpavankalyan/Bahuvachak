@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import sys
+sys.path.insert(0,"/datadrive2/usaip/home/Bahuvachak_samyak/Bahuvachak")
 import time
 from multiprocess import set_start_method
 from datetime import timedelta
@@ -75,6 +76,7 @@ logger = logging.getLogger(__name__)
 
 
 def main():
+    
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
@@ -86,7 +88,7 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
+    LANGUAGES = list(data_args.eval_dataset_config_name.split('+'))
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
     send_example_telemetry("run_parler_tts", model_args, data_args)
@@ -378,7 +380,6 @@ def main():
     logger.debug(str(accelerator.process_index), main_process_only=False, in_order=True)
     test_tensor = torch.tensor([accelerator.process_index], device=accelerator.device)
     gathered_tensor = accelerator.gather(test_tensor)
-    print("gathered_tensor", gathered_tensor)
     accelerator.wait_for_everyone()
 
     if not dataset_was_precomputed:
@@ -969,7 +970,12 @@ def main():
             outputs = eval_model(**batch)
         # CE (data) loss
         ce_loss = outputs.loss
-        metrics = {"loss": ce_loss}
+        metrics = {key: [] for key in LANGUAGES}
+        count_value = 0
+        for i in batch['language']:
+            metrics[i].append(ce_loss[count_value])
+            count_value+=1
+        metrics = {key:torch.nan_to_num(torch.mean(torch.Tensor(metrics[key]))).cuda() for key in metrics.keys()}
         return metrics
 
     def generate_step(batch, accelerator):
@@ -1015,6 +1021,7 @@ def main():
         for batch in train_dataloader:
             with accelerator.accumulate(model):
                 loss, train_metric = train_step(batch, accelerator, autocast_kwargs)
+                loss = torch.mean(loss)
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(model.parameters(), training_args.max_grad_norm)
@@ -1081,7 +1088,6 @@ def main():
 
                     # release training input batch
                     batch = release_memory(batch)
-
                     validation_dataloader = DataLoader(
                         vectorized_datasets["eval"],
                         collate_fn=data_collator,
@@ -1091,7 +1097,6 @@ def main():
                         pin_memory=training_args.dataloader_pin_memory,
                     )
                     validation_dataloader = accelerator.prepare(validation_dataloader)
-
                     for batch in tqdm(
                         validation_dataloader,
                         desc=f"Evaluating - Inference ...",
@@ -1103,6 +1108,7 @@ def main():
                         eval_metric = accelerator.gather_for_metrics(eval_metric)
                         eval_metric = {key: val.unsqueeze(0) if val.ndim == 0 else val for (key,val) in eval_metric.items()}
                         eval_metrics.append(eval_metric)
+
 
                     if training_args.predict_with_generate:
                         validation_dataloader = DataLoader(
@@ -1121,6 +1127,7 @@ def main():
                             position=2,
                             disable=not accelerator.is_local_main_process,
                         ):
+                            del batch['language']
                             generated_audios = generate_step(batch, accelerator)
                             # Gather all predictions and targets
                             generated_audios, input_ids, prompts = accelerator.pad_across_processes(
@@ -1136,7 +1143,7 @@ def main():
                     eval_time = time.time() - eval_start
                     # normalize eval metrics
                     eval_metrics = {
-                        key: torch.mean(torch.cat([d[key] for d in eval_metrics])).to("cpu") for key in eval_metrics[0]
+                        key: torch.mean(torch.cat([d[key] for d in eval_metrics])).detach().cpu() for key in eval_metrics[0]
                     }
 
                     # compute metrics
@@ -1176,11 +1183,11 @@ def main():
                         accelerator.wait_for_everyone()
 
                     # Print metrics and update progress bar
-                    if accelerator.is_local_main_process:
-                        steps_trained_progress_bar.write(
-                            f"Eval results for step ({cur_step} / {total_train_steps} | Eval Loss: {eval_metrics['loss']} |"
-                            f" {metrics_desc})"
-                        )
+                    # if accelerator.is_local_main_process:
+                    #     steps_trained_progress_bar.write(
+                    #         f"Eval results for step ({cur_step} / {total_train_steps} | Eval Loss: {eval_metrics['loss']} |"
+                    #         f" {metrics_desc})"
+                    #     )
 
                     log_metric(
                         accelerator,

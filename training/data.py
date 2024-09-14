@@ -79,6 +79,8 @@ class DataCollatorParlerTTSWithPadding:
         # different padding methods
 
         labels = [torch.tensor(feature["labels"]).transpose(0, 1) for feature in features]
+        languages = [feature["language"] for feature in features]
+        #languages = [torch.tensor(mapLanguages2Int(feature["languages"])) for feature in features]
         # (bsz, seq_len, num_codebooks)
         labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=-100)
         if self.audio_max_length is not None and self.padding == "max_length":
@@ -96,7 +98,7 @@ class DataCollatorParlerTTSWithPadding:
             max_length=self.description_max_length,
         )
 
-        batch = {"labels": labels, **input_ids}
+        batch = {"labels": labels, "language" : languages, **input_ids}
 
         prompt_input_ids = [{"input_ids": feature["prompt_input_ids"]} for feature in features]
         prompt_input_ids = self.prompt_tokenizer.pad(
