@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import sys
+sys.path.insert(0,"/datadrive2/usaip/home/Bahuvachak_samyak/Bahuvachak")
 import time
 from multiprocess import set_start_method
 from datetime import timedelta
@@ -45,6 +46,10 @@ from transformers.utils import send_example_telemetry
 from accelerate import Accelerator, skip_first_batches
 from accelerate.utils import set_seed, AutocastKwargs, InitProcessGroupKwargs, TorchDynamoPlugin
 from accelerate.utils.memory import release_memory
+
+from pyannote.audio import Model as Model_SPK
+from pyannote.audio import Inference as Inf_SPK
+
 
 from IndicTransToolkit import IndicProcessor
 
@@ -72,6 +77,7 @@ logger = logging.getLogger(__name__)
 
 
 def main():
+    
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
@@ -83,7 +89,7 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
+    LANGUAGES = list(data_args.eval_dataset_config_name.split('+'))
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
     send_example_telemetry("run_parler_tts", model_args, data_args)
@@ -197,6 +203,9 @@ def main():
         trust_remote_code=data_args.trust_remote_code,
     )
     sampling_rate = feature_extractor.sampling_rate
+
+    model_spk = Model_SPK.from_pretrained("pyannote/embedding")
+    speaker_embedding_model = Inf_SPK(model_spk, window="whole")
 
     # load prompt tokenizer
     prompt_tokenizer = AutoTokenizer.from_pretrained(
@@ -344,6 +353,8 @@ def main():
         attn_implementation=model_args.attn_implementation,
     )
 
+    model.resize_prompt_embeddings(len(prompt_tokenizer))
+
     # enable gradient checkpointing if necessary
     if training_args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
@@ -377,7 +388,6 @@ def main():
     logger.debug(str(accelerator.process_index), main_process_only=False, in_order=True)
     test_tensor = torch.tensor([accelerator.process_index], device=accelerator.device)
     gathered_tensor = accelerator.gather(test_tensor)
-    print("gathered_tensor", gathered_tensor)
     accelerator.wait_for_everyone()
 
     if not dataset_was_precomputed:
@@ -402,6 +412,7 @@ def main():
                 # inlcude the language code in the config
                 prompt = ip.preprocess_batch([prompt.strip()], src_lang=language, tgt_lang=language)[0]
             batch["prompt_input_ids"] = prompt_tokenizer(prompt.strip())["input_ids"]
+            batch["language"] = language
             return batch
 
         with accelerator.local_main_process_first():
@@ -439,6 +450,7 @@ def main():
         )
 
         def apply_audio_decoder(batch):
+            speaker_embedding_model.to(batch["input_values"].device)
             len_audio = batch.pop("len_audio")
             audio_decoder.to(batch["input_values"].device).eval()
             with torch.no_grad():
@@ -451,6 +463,15 @@ def main():
             # if `pad_to_max_length`, the maximum corresponding audio length of the current batch is max_duration*sampling_rate
             max_length = len_audio.max() if padding != "max_length" else max_target_length
             output["ratio"] = torch.ones_like(len_audio) * labels.shape[-1] / max_length
+
+            #output["speaker_embeddings"] = torch.rand(len(len_audio), 512).to(batch["input_values"].device)
+            speaker_embeddings = []
+            for audio in batch["input_values"]:
+                embedding = speaker_embedding_model({"waveform": audio, "sample_rate": sampling_rate})  # assuming 16kHz sampling rate
+                speaker_embeddings.append(embedding)  # Store as numpy for compatibility
+
+            # Move speaker embeddings to the correct device
+            output["speaker_embeddings"] = torch.tensor(speaker_embeddings).to(batch["input_values"].device)
             return output
 
         # (1, codebooks, seq_len) where seq_len=1
@@ -505,6 +526,7 @@ def main():
 
             all_generated_labels = []
             all_lens = []
+            all_speaker_emb = []
             if start_step < total_inference_steps:
                 for i, batch in enumerate(tqdm(data_loader, disable=not accelerator.is_local_main_process)):
                     cur_step = start_step + i
@@ -516,15 +538,17 @@ def main():
                         lab = generate_labels["labels"].cpu().transpose(1, 2).to(torch.int16)
                         rat = generate_labels["ratio"].cpu().squeeze(1)
                         lens = generate_labels["len_audio"].cpu().squeeze(1)
+                        spk_emb = generate_labels["speaker_embeddings"].cpu()
                         lab = [l[:, : int(ratio * length)] for (l, ratio, length) in zip(lab, rat, lens)]
 
                         all_generated_labels.extend(lab)
                         all_lens.extend(lens)
+                        all_speaker_emb.extend(spk_emb)
 
                         if ((cur_step + 1) % data_args.save_codec_steps == 0) or (
                             cur_step == total_inference_steps - 1
                         ):
-                            tmp_labels = Dataset.from_dict({"labels": all_generated_labels, "target_length": all_lens})
+                            tmp_labels = Dataset.from_dict({"labels": all_generated_labels, "target_length": all_lens, "spk_emb": all_speaker_emb})
                             tmp_labels = tmp_labels.map(
                                 postprocess_dataset,
                                 num_proc=data_args.preprocessing_num_workers,  # this one is resource consuming if many processor.
@@ -536,11 +560,12 @@ def main():
                             )
                             all_generated_labels = []
                             all_lens = []
+                            all_speaker_emb = []
 
                 accelerator.wait_for_everyone()
 
             if accelerator.is_main_process and len(all_generated_labels) > 0:
-                tmp_labels = Dataset.from_dict({"labels": all_generated_labels, "target_length": all_lens})
+                tmp_labels = Dataset.from_dict({"labels": all_generated_labels, "target_length": all_lens, "spk_emb": all_speaker_emb})
                 tmp_labels = tmp_labels.map(
                     postprocess_dataset,
                     num_proc=data_args.preprocessing_num_workers,  # this one is resource consuming if many processor.
@@ -550,6 +575,7 @@ def main():
                 save_codec_checkpoint(os.path.join(data_args.temporary_save_to_disk, split), tmp_labels, cur_step)
                 all_generated_labels = []
                 all_lens = []
+                all_speaker_emb = []
             accelerator.wait_for_everyone()
 
             del all_generated_labels
@@ -563,7 +589,7 @@ def main():
                 vectorized_datasets[split] = concatenate_datasets([vectorized_datasets[split], tmp_labels], axis=1)
 
         accelerator.free_memory()
-        del generate_labels, all_lens
+        del generate_labels, all_lens, all_speaker_emb
 
         with accelerator.local_main_process_first():
             # NOTE: filtering is done at the end because in the `datasets` library, caching audio files is done after most operations
@@ -964,7 +990,12 @@ def main():
             outputs = eval_model(**batch)
         # CE (data) loss
         ce_loss = outputs.loss
-        metrics = {"loss": ce_loss}
+        metrics = {key: [] for key in LANGUAGES}
+        count_value = 0
+        for i in batch['language']:
+            metrics[i].append(ce_loss[count_value])
+            count_value+=1
+        metrics = {key:torch.nan_to_num(torch.mean(torch.Tensor(metrics[key]))).cuda() for key in metrics.keys()}
         return metrics
 
     def generate_step(batch, accelerator):
@@ -1015,6 +1046,7 @@ def main():
         for batch in train_dataloader:
             with accelerator.accumulate(model):
                 loss, train_metric = train_step(batch, accelerator, autocast_kwargs)
+                loss = torch.mean(loss)
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(model.parameters(), training_args.max_grad_norm)
@@ -1081,7 +1113,6 @@ def main():
 
                     # release training input batch
                     batch = release_memory(batch)
-
                     validation_dataloader = DataLoader(
                         vectorized_datasets["eval"],
                         collate_fn=data_collator,
@@ -1091,7 +1122,6 @@ def main():
                         pin_memory=training_args.dataloader_pin_memory,
                     )
                     validation_dataloader = accelerator.prepare(validation_dataloader)
-
                     for batch in tqdm(
                         validation_dataloader,
                         desc=f"Evaluating - Inference ...",
@@ -1103,6 +1133,7 @@ def main():
                         eval_metric = accelerator.gather_for_metrics(eval_metric)
                         eval_metric = {key: val.unsqueeze(0) if val.ndim == 0 else val for (key,val) in eval_metric.items()}
                         eval_metrics.append(eval_metric)
+
 
                     if training_args.predict_with_generate:
                         validation_dataloader = DataLoader(
@@ -1121,6 +1152,7 @@ def main():
                             position=2,
                             disable=not accelerator.is_local_main_process,
                         ):
+                            del batch['language']
                             generated_audios = generate_step(batch, accelerator)
                             # Gather all predictions and targets
                             generated_audios, input_ids, prompts = accelerator.pad_across_processes(
@@ -1136,7 +1168,7 @@ def main():
                     eval_time = time.time() - eval_start
                     # normalize eval metrics
                     eval_metrics = {
-                        key: torch.mean(torch.cat([d[key] for d in eval_metrics])).to("cpu") for key in eval_metrics[0]
+                        key: torch.mean(torch.cat([d[key] for d in eval_metrics])).detach().cpu() for key in eval_metrics[0]
                     }
 
                     # compute metrics
@@ -1176,11 +1208,11 @@ def main():
                         accelerator.wait_for_everyone()
 
                     # Print metrics and update progress bar
-                    if accelerator.is_local_main_process:
-                        steps_trained_progress_bar.write(
-                            f"Eval results for step ({cur_step} / {total_train_steps} | Eval Loss: {eval_metrics['loss']} |"
-                            f" {metrics_desc})"
-                        )
+                    # if accelerator.is_local_main_process:
+                    #     steps_trained_progress_bar.write(
+                    #         f"Eval results for step ({cur_step} / {total_train_steps} | Eval Loss: {eval_metrics['loss']} |"
+                    #         f" {metrics_desc})"
+                    #     )
 
                     log_metric(
                         accelerator,
