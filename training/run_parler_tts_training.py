@@ -974,6 +974,11 @@ def main():
             # if the model is compiled, we use the original model bc compile is not compatible with .generate
             eval_model = model._orig_mod
 
+        if model_args.condition_on == "audio":
+            batch["encoder_outputs"] = BaseModelOutput(
+                last_hidden_state=batch.get(speech_emb_column_name)
+            )
+            batch["attention_mask"] = batch.get("emb_attention_mask", None)
         # since we've might have loaded the weights in fp32, we have to autocast to ensure FA2 weights are in half-precision.
         # with accelerator.autocast(autocast_handler=AutocastKwargs(enabled=(attn_implementation=="flash_attention_2"))):
         output_audios = eval_model.generate(**batch, **gen_kwargs)
