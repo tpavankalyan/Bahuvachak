@@ -244,8 +244,6 @@ def main():
         }
         if data_args.description_column_name is not None:
             columns_to_keep["description_column_name"] = data_args.description_column_name
-        if data_args.speech_emb_column_name is not None:
-            columns_to_keep["speech_emb_column_name"] = data_args.speech_emb_column_name
 
 
         if training_args.do_train:
@@ -396,10 +394,9 @@ def main():
         # Preprocessing the dataset.
         # We need to tokenize the texts.
 
-        def pass_through_processors(description, prompt, language, speech_emb):
+        def pass_through_processors(description, prompt, language):
             batch = {}
             batch["input_ids"] = description_tokenizer(description.strip())["input_ids"]
-            batch[speech_emb_column_name] = speech_emb
             if model_args.prompt_tokenizer_name == "ai4bharat/indictrans2-indic-en-1B":
                 ip = IndicProcessor(inference=True)
                 # inlcude the language code in the config
@@ -412,7 +409,7 @@ def main():
             vectorized_datasets = raw_datasets.map(
                 pass_through_processors,
                 remove_columns=next(iter(raw_datasets.values())).column_names,
-                input_columns=[description_column_name, prompt_column_name, "language", speech_emb_column_name],
+                input_columns=[description_column_name, prompt_column_name, "language"],
                 num_proc=num_workers,
                 desc="preprocess datasets",
             )
@@ -931,14 +928,20 @@ def main():
         if mixed_precision == "fp16":
             # fp16 doesn't work with T5-like models
             with accelerator.autocast(autocast_handler=autocast_kwargs):
-                if training_args.parallel_mode.value != "distributed":
-                    encoder_outputs = model.text_encoder(
-                        input_ids=batch.get("input_ids"), attention_mask=batch.get("attention_mask", None)
-                    )
+                if model_args.condition_on == "text":
+                    if training_args.parallel_mode.value != "distributed":
+                        encoder_outputs = model.text_encoder(
+                            input_ids=batch.get("input_ids"), attention_mask=batch.get("attention_mask", None)
+                        )
+                    else:
+                        encoder_outputs = model.module.text_encoder(
+                            input_ids=batch.get("input_ids"), attention_mask=batch.get("attention_mask", None)
+                        )
                 else:
-                    encoder_outputs = model.module.text_encoder(
-                        input_ids=batch.get("input_ids"), attention_mask=batch.get("attention_mask", None)
+                    encoder_outputs = BaseModelOutput(
+                        last_hidden_state=batch.get(speech_emb_column_name)
                     )
+                    batch["attention_mask"] = batch.get("emb_attention_mask", None)
                 # we optionnally project last_hidden_state to avoid recomputing every time
                 encoder_hidden_states = encoder_outputs.last_hidden_state
                 if (
