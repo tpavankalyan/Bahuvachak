@@ -2284,7 +2284,8 @@ class ParlerTTSForConditionalGeneration(PreTrainedModel):
             self.text_encoder.config.hidden_size != self.decoder.config.hidden_size
             and self.decoder.config.cross_attention_hidden_size is None
         ):
-            self.enc_to_dec_proj = nn.Linear(self.text_encoder.config.hidden_size, self.decoder.config.hidden_size)
+            input_hidden_size = self.text_encoder.config.hidden_size if config.condition_on == "text" else config.emb_dim
+            self.enc_to_dec_proj = nn.Linear(input_hidden_size, self.decoder.config.hidden_size)
 
         # prompt embeddings
         self.embed_prompts = nn.Embedding(config.vocab_size, self.decoder.config.hidden_size)
@@ -2352,6 +2353,50 @@ class ParlerTTSForConditionalGeneration(PreTrainedModel):
 
     def set_output_embeddings(self, new_embeddings):
         return self.decoder.set_output_embeddings(new_embeddings)
+    
+    def get_prompt_embeddings(self):
+        return self.embed_prompts
+
+    def set_prompt_embeddings(self, value):
+        self.embed_prompts = value
+
+    def resize_prompt_embeddings(self, new_num_tokens: Optional[int] = None) -> torch.nn.Embedding:
+        model_embeds = self._resize_prompt_embeddings(new_num_tokens)
+        if new_num_tokens is None:
+            return model_embeds
+
+        # Update base model and current model config
+        self.config.vocab_size = new_num_tokens
+
+        return model_embeds
+
+    def _resize_prompt_embeddings(self, new_num_tokens):
+        old_embeddings = self.get_prompt_embeddings()
+        new_embeddings = self._get_resized_embeddings(old_embeddings, new_num_tokens)
+        self.set_prompt_embeddings(new_embeddings)
+        return self.get_prompt_embeddings()
+
+    def _get_resized_embeddings(self, old_embeddings: torch.nn.Embedding, new_num_tokens: Optional[int] = None) -> torch.nn.Embedding:
+
+        if new_num_tokens is None:
+            return old_embeddings
+
+        old_num_tokens, old_embedding_dim = old_embeddings.weight.size()
+        if old_num_tokens == new_num_tokens:
+            return old_embeddings
+
+        # Build new embeddings
+        new_embeddings = nn.Embedding(new_num_tokens, old_embedding_dim)
+        new_embeddings.to(old_embeddings.weight.device)
+
+        # initialize all new embeddings (in particular added tokens)
+        self._init_weights(new_embeddings)
+
+        # Copy token embeddings from the previous weights
+        num_tokens_to_copy = min(old_num_tokens, new_num_tokens)
+        new_embeddings.weight.data[:num_tokens_to_copy, :] = old_embeddings.weight.data[:num_tokens_to_copy, :]
+
+        return new_embeddings
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
