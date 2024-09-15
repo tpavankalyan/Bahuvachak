@@ -377,4 +377,13 @@ class ParlerTTSTrainingArguments(Seq2SeqTrainingArguments):
             )
         },
     )
+    eval_generation_num_samples_per_language: int = field(
+        default=2,
+        metadata={
+            "help": (
+                "Number of samples to generate during evaluation per language."
+            )
+        },
+    )
+
 

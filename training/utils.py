@@ -128,8 +128,20 @@ def log_metric(
 ):
     """Helper function to log all training/evaluation metrics with the correct prefixes and styling."""
     log_metrics = {}
+    generation_metrics = set(["clap",  "wer", "word_error", "clean_samples"])
     for k, v in metrics.items():
-        log_metrics[f"{prefix}/{k}"] = v
+        is_generation_metric = False
+        for metric in generation_metrics:
+            if metric in k:
+                is_generation_metric = True
+                k = k.split("_")
+                language = "_".join(k[:2])
+                metric = "_".join(k[2:])
+                log_metrics[f"{prefix}_{metric}/{language}"] = v
+                break
+        if not is_generation_metric:
+            log_metrics[f"{prefix}/{k}"] = v
+        
     log_metrics[f"{prefix}/time"] = train_time
     log_metrics[f"{prefix}/epoch"] = epoch
     if learning_rate is not None:
@@ -143,6 +155,7 @@ def log_pred(
     pred_prompts: List[str],
     transcriptions: List[str],
     audios: List[torch.Tensor],
+    languages: List[str],
     si_sdr_measures: List[float],
     sampling_rate: int,
     step: int,
@@ -185,16 +198,10 @@ def log_pred(
             )
 
         # wandb can only loads 100 audios per step
-        wandb_tracker.log(
-            {
-                "Speech samples": [
-                    Audio(
-                        audio,
-                        caption=f"{pred_prompts[i]} --- DESCRIPTION: {pred_descriptions[i]}",
-                        sample_rate=sampling_rate,
-                    )
-                    for (i, audio) in enumerate(audios[: min(len(audios), 100)])
-                ]
-            },
-            step=step,
-        )
+        for (i, audio) in enumerate(audios[: min(len(audios), 100)]):
+            wandb_tracker.log(
+                {
+                    f"Speech Sample {languages[i]}": Audio(audio, caption=f"TARGET: {transcriptions[i]}\nPREDICTED-PROMPT: {pred_prompts[i]}\nDESCRIPTION: {pred_descriptions[i]}", sample_rate=sampling_rate),
+                },
+                step=step,
+            )

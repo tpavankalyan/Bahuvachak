@@ -20,12 +20,11 @@ import logging
 import os
 import re
 import sys
-sys.path.insert(0,"/datadrive2/usaip/home/Bahuvachak_samyak/Bahuvachak")
 import time
 from multiprocess import set_start_method
 from datetime import timedelta
 
-from tqdm import tqdm
+from tqdm.auto import tqdm, trange
 from pathlib import Path
 
 import torch
@@ -694,6 +693,7 @@ def main():
         audios,
         descriptions,
         prompts,
+        languages,
         device="cpu",
         compute_clap_similarity_metric=False,
         compute_noise_level_metric=False,
@@ -704,32 +704,42 @@ def main():
         texts = description_tokenizer.batch_decode(input_ids, skip_special_tokens=True)
         prompts = prompt_tokenizer.batch_decode(prompts, skip_special_tokens=True)
         audios = [a.float().cpu().numpy() for a in audios]
+        language_ids = {}
+        for idx, language in enumerate(languages):
+            if language not in language_ids:
+                language_ids[language] = []
+            language_ids[language].append(idx)
+        for language in languages:
+            language_texts = [texts[i] for i in language_ids[language]]
+            language_prompts = [prompts[i] for i in language_ids[language]]
+            language_audios = [audios[i] for i in language_ids[language]]
 
-        if compute_clap_similarity_metric:
-            clap_score = clap_similarity(
-                model_args.clap_model_name_or_path, texts, audios, device, input_sampling_rate=sampling_rate
+
+            if compute_clap_similarity_metric:
+                clap_score = clap_similarity(
+                    model_args.clap_model_name_or_path, language_texts, language_audios, device, input_sampling_rate=sampling_rate
+                )
+                results[f"{language}_clap"] = clap_score
+
+            si_sdr_measures = None
+            if compute_noise_level_metric:
+                si_sdr_measures = si_sdr(language_audios, device, input_sampling_rate=sampling_rate)
+
+            word_error, transcriptions, clean_word_error, noisy_word_error, percent_clean_samples = wer(
+                model_args.asr_model_name_or_path,
+                language_prompts,
+                language_audios,
+                device,
+                training_args.per_device_eval_batch_size,
+                sampling_rate,
+                noise_level_to_compute_clean_wer,
+                si_sdr_measures,
             )
-            results["clap"] = clap_score
-
-        si_sdr_measures = None
-        if compute_noise_level_metric:
-            si_sdr_measures = si_sdr(audios, device, input_sampling_rate=sampling_rate)
-
-        word_error, transcriptions, clean_word_error, noisy_word_error, percent_clean_samples = wer(
-            model_args.asr_model_name_or_path,
-            prompts,
-            audios,
-            device,
-            training_args.per_device_eval_batch_size,
-            sampling_rate,
-            noise_level_to_compute_clean_wer,
-            si_sdr_measures,
-        )
-        results["wer"] = word_error
-        if clean_word_error is not None:
-            results["clean_wer"] = clean_word_error
-            results["noisy_word_error"] = noisy_word_error
-            results["percent_clean_samples"] = percent_clean_samples
+            results[f"{language}_wer"] = word_error
+            if clean_word_error is not None:
+                results[f"{language}_clean_wer"] = clean_word_error
+                results[f"{language}_noisy_word_error"] = noisy_word_error
+                results[f"{language}_percent_clean_samples"] = percent_clean_samples
 
         return results, texts, prompts, audios, transcriptions, si_sdr_measures
 
@@ -991,10 +1001,8 @@ def main():
         # CE (data) loss
         ce_loss = outputs.loss
         metrics = {key: [] for key in LANGUAGES}
-        count_value = 0
-        for i in batch['language']:
-            metrics[i].append(ce_loss[count_value])
-            count_value+=1
+        for idx, i in enumerate(batch['language']):
+            metrics[i].append(ce_loss[idx])
         metrics = {key:torch.nan_to_num(torch.mean(torch.Tensor(metrics[key]))).cuda() for key in metrics.keys()}
         return metrics
 
@@ -1146,13 +1154,41 @@ def main():
                         )
                         validation_dataloader = accelerator.prepare(validation_dataloader)
                         # generation
-                        for batch in tqdm(
-                            validation_dataloader,
+                        validation_language = {}
+                        for batch in validation_dataloader:
+                            for idx, lang in enumerate(batch['language']):
+                                if lang in validation_language:
+                                    if len(validation_language[lang]) >= training_args.eval_generation_num_samples_per_language:
+                                        continue
+                                if lang not in validation_language:
+                                    validation_language[lang] = [{key: val[idx] for key, val in batch.items()}]
+                                else:
+                                    validation_language[lang].append({key: val[idx] for key, val in batch.items()})
+                                
+                        
+                        all_samples = []
+                        for value in validation_language.values():
+                            all_samples.extend(value)
+                        
+                        languages = [sample['language'] for sample in all_samples]
+                        generation_batch_size = training_args.per_device_eval_batch_size
+                        for idx in tqdm(
+                            range(0, len(all_samples), generation_batch_size),
                             desc=f"Evaluating - Generation ...",
                             position=2,
                             disable=not accelerator.is_local_main_process,
                         ):
-                            del batch['language']
+                            batch = {}
+                            non_required_keys = ['language', 'speech_emb', 'emb_attention_mask']
+                            for key in all_samples[0].keys():
+                                if key in non_required_keys:
+                                    continue
+                                else:
+                                    print(key)
+                                batch[key] = [sample[key] for sample in all_samples[idx:idx + generation_batch_size]]
+                                if isinstance(batch[key][0], torch.Tensor):
+                                    batch[key] = torch.stack(batch[key])
+                            
                             generated_audios = generate_step(batch, accelerator)
                             # Gather all predictions and targets
                             generated_audios, input_ids, prompts = accelerator.pad_across_processes(
@@ -1186,6 +1222,7 @@ def main():
                                 eval_preds,
                                 eval_descriptions,
                                 eval_prompts,
+                                languages,
                                 accelerator.device,
                                 training_args.compute_clap_similarity_metric,
                                 training_args.compute_noise_level_metric,
@@ -1200,6 +1237,7 @@ def main():
                                     pred_prompts,
                                     transcriptions,
                                     audios,
+                                    languages,
                                     si_sdr_measures,
                                     sampling_rate=sampling_rate,
                                     step=cur_step,
