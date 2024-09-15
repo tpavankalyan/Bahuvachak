@@ -2284,7 +2284,8 @@ class ParlerTTSForConditionalGeneration(PreTrainedModel):
             self.text_encoder.config.hidden_size != self.decoder.config.hidden_size
             and self.decoder.config.cross_attention_hidden_size is None
         ):
-            self.enc_to_dec_proj = nn.Linear(self.text_encoder.config.hidden_size, self.decoder.config.hidden_size)
+            input_hidden_size = self.text_encoder.config.hidden_size if config.condition_on == "text" else config.emb_dim
+            self.enc_to_dec_proj = nn.Linear(input_hidden_size, self.decoder.config.hidden_size)
 
         # prompt embeddings
         self.embed_prompts = nn.Embedding(config.vocab_size, self.decoder.config.hidden_size)

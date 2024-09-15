@@ -94,6 +94,19 @@ class ModelArguments:
             "help": "Prompt tokenizer padding side. Defaults to `left`. If the prompt is pre-pended to the codebooks hidden states, it should be padded on the left."
         },
     )
+    condition_on: str = field(
+        default="text",
+        metadata={
+            "help": "Specify whether to condition on 'text' or 'audio'.",
+            "choices": ["text", "audio"]
+        },
+    )
+    emb_dim: int = field(
+        default=0,
+        metadata={
+            "help": "Speaker embedding dimension. If set to 0, will not use speaker embeddings."
+        },
+    )
 
 
 @dataclass
@@ -179,6 +192,10 @@ class DataTrainingArguments:
     prompt_column_name: str = field(
         default=None,
         metadata={"help": "The name of the dataset column containing the prompt text data. Defaults to 'None'."},
+    )
+    speech_emb_column_name: str = field(
+        default=None,
+        metadata={"help": "The name of the dataset column containing the speech embeddings data. Defaults to 'None'."},
     )
     overwrite_cache: bool = field(
         default=False, metadata={"help": "Overwrite the cached preprocessed datasets or not."}
@@ -360,3 +377,4 @@ class ParlerTTSTrainingArguments(Seq2SeqTrainingArguments):
             )
         },
     )
+

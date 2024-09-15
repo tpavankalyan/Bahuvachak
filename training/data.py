@@ -89,6 +89,8 @@ class DataCollatorParlerTTSWithPadding:
             )
 
         input_ids = [{"input_ids": feature["input_ids"]} for feature in features]
+        n = 1 #times to replicate the speaker embedding
+        speech_emb = torch.stack([torch.tensor(feature["spk_emb"]).unsqueeze(0).repeat(n,1) for feature in features])
 
         input_ids = self.description_tokenizer.pad(
             input_ids,
@@ -98,7 +100,10 @@ class DataCollatorParlerTTSWithPadding:
             max_length=self.description_max_length,
         )
 
-        batch = {"labels": labels, "language" : languages, **input_ids}
+        feature/condition_on_speech
+        batch = {"labels": labels, **input_ids, "speech_emb": speech_emb}
+        batch["emb_attention_mask"] = torch.ones(speech_emb.shape[0], n)
+
 
         prompt_input_ids = [{"input_ids": feature["prompt_input_ids"]} for feature in features]
         prompt_input_ids = self.prompt_tokenizer.pad(
