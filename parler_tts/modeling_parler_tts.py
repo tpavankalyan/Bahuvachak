@@ -1798,8 +1798,8 @@ class ParlerTTSForCausalLM(ParlerTTSPreTrainedModel):
             # since encoder hidden states have concatenated to hidden states, take the last hidden states corresponding to labels
             logits = lm_logits[:, :, -labels.shape[1] :]
 
-            loss_fct = CrossEntropyLoss()
-            loss = torch.zeros([], device=self.device)
+            loss_fct = CrossEntropyLoss(reduction='none')
+            loss = None
 
             # (bsz, vocab_size, seq_len, num_codebooks), (bsz, seq_len, num_codebooks)
             labels = labels.masked_fill(labels == self.config.bos_token_id, -100)
@@ -1807,14 +1807,18 @@ class ParlerTTSForCausalLM(ParlerTTSPreTrainedModel):
             # we use every codebooks token AND one single EOS at the end of each codebooks
             mask = (input_ids.transpose(1, 2) != self.config.eos_token_id) & ((labels != -100))
 
+            bcz = logits.shape[0]
             # per codebook cross-entropy
             for codebook in range(self.config.num_codebooks):
-                codebook_logits = logits[:, codebook].contiguous().view(-1, logits.shape[-1])
-                codebook_mask = mask[..., codebook].contiguous().view(-1)
-                codebook_labels = labels[..., codebook].contiguous().view(-1)
+                codebook_logits = logits[:, codebook].contiguous().view(bcz, -1, logits.shape[-1])
+                codebook_mask = mask[..., codebook].contiguous().view(bcz, -1)
+                codebook_labels = labels[..., codebook].contiguous().view(bcz, -1)
 
                 codebook_loss = loss_fct(codebook_logits[codebook_mask], codebook_labels[codebook_mask])
-                loss += codebook_loss
+                if loss is None:
+                    loss = codebook_loss
+                else:
+                    loss += codebook_loss
 
             loss = loss / self.config.num_codebooks
 
@@ -2349,6 +2353,50 @@ class ParlerTTSForConditionalGeneration(PreTrainedModel):
 
     def set_output_embeddings(self, new_embeddings):
         return self.decoder.set_output_embeddings(new_embeddings)
+    
+    def get_prompt_embeddings(self):
+        return self.embed_prompts
+
+    def set_prompt_embeddings(self, value):
+        self.embed_prompts = value
+
+    def resize_prompt_embeddings(self, new_num_tokens: Optional[int] = None) -> torch.nn.Embedding:
+        model_embeds = self._resize_prompt_embeddings(new_num_tokens)
+        if new_num_tokens is None:
+            return model_embeds
+
+        # Update base model and current model config
+        self.config.vocab_size = new_num_tokens
+
+        return model_embeds
+
+    def _resize_prompt_embeddings(self, new_num_tokens):
+        old_embeddings = self.get_prompt_embeddings()
+        new_embeddings = self._get_resized_embeddings(old_embeddings, new_num_tokens)
+        self.set_prompt_embeddings(new_embeddings)
+        return self.get_prompt_embeddings()
+
+    def _get_resized_embeddings(self, old_embeddings: torch.nn.Embedding, new_num_tokens: Optional[int] = None) -> torch.nn.Embedding:
+
+        if new_num_tokens is None:
+            return old_embeddings
+
+        old_num_tokens, old_embedding_dim = old_embeddings.weight.size()
+        if old_num_tokens == new_num_tokens:
+            return old_embeddings
+
+        # Build new embeddings
+        new_embeddings = nn.Embedding(new_num_tokens, old_embedding_dim)
+        new_embeddings.to(old_embeddings.weight.device)
+
+        # initialize all new embeddings (in particular added tokens)
+        self._init_weights(new_embeddings)
+
+        # Copy token embeddings from the previous weights
+        num_tokens_to_copy = min(old_num_tokens, new_num_tokens)
+        new_embeddings.weight.data[:num_tokens_to_copy, :] = old_embeddings.weight.data[:num_tokens_to_copy, :]
+
+        return new_embeddings
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):

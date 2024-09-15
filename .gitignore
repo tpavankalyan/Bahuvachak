@@ -171,3 +171,7 @@ tags
 .ruff_cache
 
 wandb
+
+tmp_dataset_audio/
+
+output_dir*/
