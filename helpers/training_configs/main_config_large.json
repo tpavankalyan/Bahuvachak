@@ -62,9 +62,9 @@
     "predict_with_generate": true,
     "include_inputs_for_metrics": true,
     "evaluation_strategy": "steps",
-    "eval_steps": 2,
-    "save_steps": 2,
-    "generation_steps": 2,
+    "eval_steps": 2500,
+    "save_steps": 2500,
+    "generation_steps": 2500,
 
     "per_device_eval_batch_size": 4,
 
