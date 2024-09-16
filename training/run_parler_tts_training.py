@@ -1018,7 +1018,7 @@ def main():
             outputs = eval_model(**batch)
         # CE (data) loss
         ce_loss = outputs.loss
-        metrics = {key: [] for key in LANGUAGES}
+        metrics = {f'{key}_loss': [] for key in LANGUAGES}
         for idx, i in enumerate(batch['language']):
             metrics[f'{i}_loss'].append(ce_loss[idx])
         
@@ -1257,23 +1257,6 @@ def main():
                         pred_descriptions = description_tokenizer.batch_decode(gen_descriptions, skip_special_tokens=True)
                         pred_prompts = prompt_tokenizer.batch_decode(gen_prompts, skip_special_tokens=True)
                         audios = [a.float().cpu().numpy() for a in gen_preds]
-                        # (
-                        #     gen_metrics,
-                        #     pred_descriptions,
-                        #     pred_prompts,
-                        #     audios,
-                        #     transcriptions,
-                        #     si_sdr_measures,
-                        # ) = compute_metrics(
-                        #     gen_preds,
-                        #     gen_descriptions,
-                        #     gen_prompts,
-                        #     languages,
-                        #     accelerator.device,
-                        #     training_args.compute_clap_similarity_metric,
-                        #     training_args.compute_noise_level_metric,
-                        #     training_args.noise_level_to_compute_clean_wer,
-                        # )
                         if "wandb" in training_args.report_to:
                             log_pred(
                                 accelerator,

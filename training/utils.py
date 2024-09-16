@@ -128,19 +128,8 @@ def log_metric(
 ):
     """Helper function to log all training/evaluation metrics with the correct prefixes and styling."""
     log_metrics = {}
-    generation_metrics = set(["clap",  "wer", "word-error", "clean-samples"])
     for k, v in metrics.items():
-        is_generation_metric = False
-        for metric in generation_metrics:
-            if metric in k:
-                is_generation_metric = True
-                k = k.split("_")
-                metric = k[-1]
-                language = "_".join(k[:-1])
-                log_metrics[f"{prefix}_{metric}/{language}_{metric}"] = v
-                break
-        if not is_generation_metric:
-            log_metrics[f"{prefix}/{k}"] = v
+        log_metrics[f"{prefix}/{k}"] = v
         
     log_metrics[f"{prefix}/time"] = train_time
     log_metrics[f"{prefix}/epoch"] = epoch
