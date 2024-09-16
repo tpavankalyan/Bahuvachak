@@ -356,6 +356,8 @@ def main():
     )
 
     model.resize_prompt_embeddings(len(prompt_tokenizer))
+    if model_args.condition_on == "audio":
+        model.reshape_embeddings(model_args.emb_dim)
 
     # enable gradient checkpointing if necessary
     if training_args.gradient_checkpointing:
@@ -929,6 +931,7 @@ def main():
         accelerator,
         autocast_kwargs,
     ):
+        
         if mixed_precision == "fp16":
             # fp16 doesn't work with T5-like models
             with accelerator.autocast(autocast_handler=autocast_kwargs):
@@ -969,6 +972,7 @@ def main():
         ce_loss = outputs.loss
 
         metrics = {"loss": ce_loss}
+        metrics = {key:torch.nan_to_num(torch.mean(torch.Tensor(metrics[key]))).cuda() for key in metrics.keys()}
         return ce_loss, metrics
 
     # Define eval fn
@@ -1018,7 +1022,7 @@ def main():
             outputs = eval_model(**batch)
         # CE (data) loss
         ce_loss = outputs.loss
-        metrics = {key: [] for key in LANGUAGES}
+        metrics = {key+"_loss": [] for key in LANGUAGES}
         for idx, i in enumerate(batch['language']):
             metrics[f'{i}_loss'].append(ce_loss[idx])
         
@@ -1230,7 +1234,7 @@ def main():
                         position=2,
                         disable=not accelerator.is_local_main_process,
                     ):
-                        non_required_keys = ['speech_emb', 'emb_attention_mask']
+                        non_required_keys = ['spk_emb', 'emb_attention_mask']
 
                         batch_languages = batch.pop("language", None)
                         for key in non_required_keys:

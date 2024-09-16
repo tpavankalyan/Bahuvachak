@@ -2281,10 +2281,10 @@ class ParlerTTSForConditionalGeneration(PreTrainedModel):
 
         # text encoder outputs might need to be projected to different dimension for decoder
         if (
-            self.text_encoder.config.hidden_size != self.decoder.config.hidden_size
-            and self.decoder.config.cross_attention_hidden_size is None
+            ((self.text_encoder.config.hidden_size != self.decoder.config.hidden_size) or (self.config.emb_dim != self.decoder.config.hidden_size))
+                and self.decoder.config.cross_attention_hidden_size is None
         ):
-            input_hidden_size = self.text_encoder.config.hidden_size if config.condition_on == "text" else config.emb_dim
+            input_hidden_size = self.text_encoder.config.hidden_size
             self.enc_to_dec_proj = nn.Linear(input_hidden_size, self.decoder.config.hidden_size)
 
         # prompt embeddings
@@ -2360,6 +2360,9 @@ class ParlerTTSForConditionalGeneration(PreTrainedModel):
 
     def set_prompt_embeddings(self, value):
         self.embed_prompts = value
+
+    def reshape_embeddings(self, new_hidden_size):
+        self.enc_to_dec_proj = nn.Linear(new_hidden_size, self.decoder.config.hidden_size)
 
     def resize_prompt_embeddings(self, new_num_tokens: Optional[int] = None) -> torch.nn.Embedding:
         model_embeds = self._resize_prompt_embeddings(new_num_tokens)
@@ -2699,20 +2702,28 @@ class ParlerTTSForConditionalGeneration(PreTrainedModel):
                 prompt_hidden_states = self.embed_prompts(prompt_input_ids)
 
         if encoder_outputs is None:
-            encoder_outputs = self.text_encoder(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                inputs_embeds=inputs_embeds,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-                **kwargs_text_encoder,
-            )
+            if self.config.condition_on == "audio":
+                encoder_outputs = BaseModelOutput(
+                            last_hidden_state=kwargs.get("spk_emb")
+                        )
+                attention_mask = kwargs.get("emb_attention_mask", None)
+            else:
+                encoder_outputs = self.text_encoder(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    inputs_embeds=inputs_embeds,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                    **kwargs_text_encoder,
+                )
+
             encoder_hidden_states = encoder_outputs[0]
 
             # optionally project encoder_hidden_states
+
             if (
-                self.text_encoder.config.hidden_size != self.decoder.config.hidden_size
+                ((self.text_encoder.config.hidden_size != self.decoder.config.hidden_size) or (self.config.emb_dim != self.decoder.config.hidden_size))
                 and self.decoder.config.cross_attention_hidden_size is None
             ):
                 encoder_hidden_states = self.enc_to_dec_proj(encoder_hidden_states)

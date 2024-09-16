@@ -101,7 +101,7 @@ class DataCollatorParlerTTSWithPadding:
         )
 
 
-        batch = {"labels": labels, **input_ids, "speech_emb": speech_emb, "language":languages}
+        batch = {"labels": labels, **input_ids, "spk_emb": speech_emb, "language":languages}
         batch["emb_attention_mask"] = torch.ones(speech_emb.shape[0], n)
 
 
