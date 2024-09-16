@@ -2289,6 +2289,7 @@ class ParlerTTSForConditionalGeneration(PreTrainedModel):
 
         # prompt embeddings
         self.embed_prompts = nn.Embedding(config.vocab_size, self.decoder.config.hidden_size)
+        
 
         self.prompt_cross_attention = config.prompt_cross_attention
         if config.prompt_cross_attention:
@@ -3314,6 +3315,7 @@ class ParlerTTSForConditionalGeneration(PreTrainedModel):
         generation_config = copy.deepcopy(generation_config)
         model_kwargs = generation_config.update(**kwargs)  # All unused kwargs must be model kwargs
         generation_config.validate()
+        model_kwargs = {k: v for k, v in model_kwargs.items() if k not in ['speech_emb', 'emb_attention_mask']}
         self._validate_model_kwargs(model_kwargs.copy())
 
         if model_kwargs.get("encoder_outputs") is not None and type(model_kwargs["encoder_outputs"]) == tuple:
