@@ -128,16 +128,16 @@ def log_metric(
 ):
     """Helper function to log all training/evaluation metrics with the correct prefixes and styling."""
     log_metrics = {}
-    generation_metrics = set(["clap",  "wer", "word_error", "clean_samples"])
+    generation_metrics = set(["clap",  "wer", "word-error", "clean-samples"])
     for k, v in metrics.items():
         is_generation_metric = False
         for metric in generation_metrics:
             if metric in k:
                 is_generation_metric = True
                 k = k.split("_")
-                language = "_".join(k[:2])
-                metric = "_".join(k[2:])
-                log_metrics[f"{prefix}_{metric}/{language}"] = v
+                metric = k[-1]
+                language = "_".join(k[:-1])
+                log_metrics[f"{prefix}_{metric}/{language}_{metric}"] = v
                 break
         if not is_generation_metric:
             log_metrics[f"{prefix}/{k}"] = v
@@ -153,10 +153,8 @@ def log_pred(
     accelerator,
     pred_descriptions: List[str],
     pred_prompts: List[str],
-    transcriptions: List[str],
     audios: List[torch.Tensor],
     languages: List[str],
-    si_sdr_measures: List[float],
     sampling_rate: int,
     step: int,
     prefix: str = "eval",
@@ -166,42 +164,15 @@ def log_pred(
     if accelerator.is_main_process:
         wandb_tracker = accelerator.get_tracker("wandb")
         # pretty name for current step: step 50000 -> step 50k
-        cur_step_pretty = f"{int(step // 1000)}k" if step > 1000 else step
-        prefix_pretty = prefix.replace("/", "-")
-
-        if si_sdr_measures is None:
-            # convert str data to a wandb compatible format
-            str_data = [
-                [pred_descriptions[i], pred_prompts[i], transcriptions[i]] for i in range(len(pred_descriptions))
-            ]
-            # log as a table with the appropriate headers
-            wandb_tracker.log_table(
-                table_name=f"predictions/{prefix_pretty}-step-{cur_step_pretty}",
-                columns=["Target descriptions", "Target prompts", "Predicted transcriptions"],
-                data=str_data[:num_lines],
-                step=step,
-                commit=False,
-            )
-        else:
-            # convert str data to a wandb compatible format
-            str_data = [
-                [pred_descriptions[i], pred_prompts[i], transcriptions[i], si_sdr_measures[i]]
-                for i in range(len(pred_descriptions))
-            ]
-            # log as a table with the appropriate headers
-            wandb_tracker.log_table(
-                table_name=f"predictions/{prefix_pretty}-step-{cur_step_pretty}",
-                columns=["Target descriptions", "Target prompts", "Predicted transcriptions", "Noise estimation"],
-                data=str_data[:num_lines],
-                step=step,
-                commit=False,
-            )
 
         # wandb can only loads 100 audios per step
         for (i, audio) in enumerate(audios[: min(len(audios), 100)]):
             wandb_tracker.log(
                 {
-                    f"Speech Sample {languages[i]}": Audio(audio, caption=f"TARGET: {transcriptions[i]}\nPREDICTED-PROMPT: {pred_prompts[i]}\nDESCRIPTION: {pred_descriptions[i]}", sample_rate=sampling_rate),
+                    f"Speech Sample {i+1}: {languages[i]}": Audio(audio, caption=f"PREDICTED-PROMPT: {pred_prompts[i]}\nDESCRIPTION: {pred_descriptions[i]}", sample_rate=sampling_rate),
                 },
                 step=step,
             )
+
+# avg across languages (eval, generation-metrics)
+# num-gen steps diff form num-eval steps
