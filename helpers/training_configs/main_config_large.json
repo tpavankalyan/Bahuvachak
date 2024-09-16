@@ -28,7 +28,7 @@
     "description_column_name": "text_description",
     "prompt_column_name": "text",
     "speech_emb_column_name": "spk_emb",
-    "condition_on": "text",
+    "condition_on": "audio",
     "emb_dim": 512,
     
     "max_duration_in_seconds": 30,
@@ -54,7 +54,7 @@
     "lr_scheduler_type": "constant_with_warmup",
     "warmup_steps":  10000,
 
-    "logging_steps": 10,
+    "logging_steps": 100,
     "freeze_text_encoder": true,
 
 
