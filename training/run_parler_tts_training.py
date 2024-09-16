@@ -20,12 +20,11 @@ import logging
 import os
 import re
 import sys
-sys.path.insert(0,"/datadrive2/usaip/home/Bahuvachak_samyak/Bahuvachak")
 import time
 from multiprocess import set_start_method
 from datetime import timedelta
 
-from tqdm import tqdm
+from tqdm.auto import tqdm, trange
 from pathlib import Path
 
 import torch
@@ -44,7 +43,7 @@ from transformers.utils import send_example_telemetry
 
 
 from accelerate import Accelerator, skip_first_batches
-from accelerate.utils import set_seed, AutocastKwargs, InitProcessGroupKwargs, TorchDynamoPlugin
+from accelerate.utils import set_seed, AutocastKwargs, InitProcessGroupKwargs, TorchDynamoPlugin, gather_object
 from accelerate.utils.memory import release_memory
 
 from pyannote.audio import Model as Model_SPK
@@ -699,6 +698,7 @@ def main():
         audios,
         descriptions,
         prompts,
+        languages,
         device="cpu",
         compute_clap_similarity_metric=False,
         compute_noise_level_metric=False,
@@ -709,32 +709,49 @@ def main():
         texts = description_tokenizer.batch_decode(input_ids, skip_special_tokens=True)
         prompts = prompt_tokenizer.batch_decode(prompts, skip_special_tokens=True)
         audios = [a.float().cpu().numpy() for a in audios]
-
-        if compute_clap_similarity_metric:
-            clap_score = clap_similarity(
-                model_args.clap_model_name_or_path, texts, audios, device, input_sampling_rate=sampling_rate
-            )
-            results["clap"] = clap_score
-
         si_sdr_measures = None
-        if compute_noise_level_metric:
-            si_sdr_measures = si_sdr(audios, device, input_sampling_rate=sampling_rate)
+        language_ids = {}
+        for idx, language in enumerate(languages):
+            if language not in language_ids:
+                language_ids[language] = []
+            language_ids[language].append(idx)
+        
+        language_ids['mean'] = list(range(len(languages)))
+        for language in language_ids:
+            language_texts = [texts[i] for i in language_ids[language]]
+            language_prompts = [prompts[i] for i in language_ids[language]]
+            language_audios = [audios[i] for i in language_ids[language]]
 
-        word_error, transcriptions, clean_word_error, noisy_word_error, percent_clean_samples = wer(
-            model_args.asr_model_name_or_path,
-            prompts,
-            audios,
-            device,
-            training_args.per_device_eval_batch_size,
-            sampling_rate,
-            noise_level_to_compute_clean_wer,
-            si_sdr_measures,
-        )
-        results["wer"] = word_error
-        if clean_word_error is not None:
-            results["clean_wer"] = clean_word_error
-            results["noisy_word_error"] = noisy_word_error
-            results["percent_clean_samples"] = percent_clean_samples
+
+            if compute_clap_similarity_metric:
+                clap_score = clap_similarity(
+                    model_args.clap_model_name_or_path, language_texts, language_audios, device, input_sampling_rate=sampling_rate
+                )
+                results[f"{language}_clap"] = clap_score
+
+            language_si_sdr_measures = None
+            if compute_noise_level_metric:
+                language_si_sdr_measures = si_sdr(language_audios, device, input_sampling_rate=sampling_rate)
+
+            word_error, language_transcriptions, clean_word_error, noisy_word_error, percent_clean_samples = wer(
+                model_args.asr_model_name_or_path,
+                language_prompts,
+                language_audios,
+                device,
+                training_args.per_device_eval_batch_size,
+                sampling_rate,
+                noise_level_to_compute_clean_wer,
+                si_sdr_measures,
+            )
+            results[f"{language}_wer"] = word_error
+            if clean_word_error is not None:
+                results[f"{language}_clean-wer"] = clean_word_error
+                results[f"{language}_noisy-word-error"] = noisy_word_error
+                results[f"{language}_percent-clean-samples"] = percent_clean_samples
+            
+            if language == "mean":
+                transcriptions = language_transcriptions
+                si_sdr_measures = language_si_sdr_measures
 
         return results, texts, prompts, audios, transcriptions, si_sdr_measures
 
@@ -761,6 +778,12 @@ def main():
         eval_steps = steps_per_epoch
     else:
         eval_steps = training_args.eval_steps
+    
+    if training_args.generation_steps is None:
+        logger.info(f"generation_steps is not set, generating at the end of each epoch")
+        generation_steps = steps_per_epoch
+    else:
+        generation_steps = training_args.generation_steps
 
     # T5 doesn't support fp16
     autocast_kwargs = AutocastKwargs(enabled=(mixed_precision != "fp16"))
@@ -996,10 +1019,10 @@ def main():
         # CE (data) loss
         ce_loss = outputs.loss
         metrics = {key: [] for key in LANGUAGES}
-        count_value = 0
-        for i in batch['language']:
-            metrics[i].append(ce_loss[count_value])
-            count_value+=1
+        for idx, i in enumerate(batch['language']):
+            metrics[f'{i}_loss'].append(ce_loss[idx])
+        
+        metrics['loss'] = ce_loss.detach()
         metrics = {key:torch.nan_to_num(torch.mean(torch.Tensor(metrics[key]))).cuda() for key in metrics.keys()}
         return metrics
 
@@ -1111,9 +1134,6 @@ def main():
                     # ======================== Evaluating ==============================
                     model.eval()
                     eval_metrics = []
-                    eval_preds = []
-                    eval_descriptions = []
-                    eval_prompts = []
                     eval_start = time.time()
 
                     # release training input batch
@@ -1138,103 +1158,141 @@ def main():
                         eval_metric = accelerator.gather_for_metrics(eval_metric)
                         eval_metric = {key: val.unsqueeze(0) if val.ndim == 0 else val for (key,val) in eval_metric.items()}
                         eval_metrics.append(eval_metric)
-
-
-                    if training_args.predict_with_generate:
-                        validation_dataloader = DataLoader(
-                            vectorized_datasets["eval"],
-                            collate_fn=data_collator,
-                            batch_size=per_device_eval_batch_size,
-                            drop_last=False,
-                            num_workers=training_args.dataloader_pin_memory,
-                            pin_memory=training_args.dataloader_pin_memory,
-                        )
-                        validation_dataloader = accelerator.prepare(validation_dataloader)
-                        # generation
-                        for batch in tqdm(
-                            validation_dataloader,
-                            desc=f"Evaluating - Generation ...",
-                            position=2,
-                            disable=not accelerator.is_local_main_process,
-                        ):
-                            del batch['language']
-                            generated_audios = generate_step(batch, accelerator)
-                            # Gather all predictions and targets
-                            generated_audios, input_ids, prompts = accelerator.pad_across_processes(
-                                (generated_audios, batch["input_ids"], batch["prompt_input_ids"]), dim=1, pad_index=0
-                            )
-                            generated_audios, input_ids, prompts = accelerator.gather_for_metrics(
-                                (generated_audios, input_ids, prompts)
-                            )
-                            eval_preds.extend(generated_audios.to("cpu"))
-                            eval_descriptions.extend(input_ids.to("cpu"))
-                            eval_prompts.extend(prompts.to("cpu"))
-
+                    
                     eval_time = time.time() - eval_start
                     # normalize eval metrics
                     eval_metrics = {
                         key: torch.mean(torch.cat([d[key] for d in eval_metrics])).detach().cpu() for key in eval_metrics[0]
                     }
 
-                    # compute metrics
-                    metrics_desc = ""
-                    if training_args.predict_with_generate:
-                        if accelerator.is_local_main_process:
-                            (
-                                metric_values,
+                    if "wandb" in training_args.report_to:
+                        log_metric(
+                            accelerator,
+                            metrics=eval_metrics,
+                            train_time=eval_time,
+                            step=cur_step,
+                            epoch=epoch,
+                            prefix="eval",
+                        )
+                    
+                    # release eval batch and relax metrics
+                    eval_metrics, batch = release_memory(
+                        eval_metrics, batch
+                    )
+
+                if training_args.predict_with_generate and (cur_step % generation_steps == 0 or cur_step == total_train_steps):
+                    # ======================== Generation ==============================
+                    model.eval()
+                    gen_preds = []
+                    gen_descriptions = []
+                    gen_prompts = []
+                    languages = []
+                    gen_start = time.time()
+
+                    # release training input batch
+                    batch = release_memory(batch)
+
+                    validation_language = {}
+                    for sample in vectorized_datasets["eval"]:
+                        if sample['language'] not in validation_language:
+                            validation_language[sample['language']] = []
+                        
+                        if len(validation_language[sample['language']]) >= training_args.generation_num_samples_per_language:
+                            continue
+                        validation_language[sample['language']].append(sample)
+
+                        if len(validation_language) == len(LANGUAGES):
+                            is_all_full = True
+                            for key in validation_language.keys():
+                                if len(validation_language[key]) < training_args.generation_num_samples_per_language:
+                                    is_all_full = False
+                            
+                            if is_all_full:
+                                break
+
+                    all_samples = []
+                    for value in validation_language.values():
+                        all_samples.extend(value)
+                    
+                    generation_dataloader = DataLoader(
+                        all_samples,
+                        collate_fn=data_collator,
+                        batch_size=per_device_eval_batch_size,
+                        drop_last=False,
+                        num_workers=training_args.dataloader_num_workers,
+                        pin_memory=training_args.dataloader_pin_memory,
+                    )
+                    generation_dataloader = accelerator.prepare(generation_dataloader)
+
+                    for batch in tqdm(
+                        generation_dataloader,
+                        desc=f"Evaluating - Generation ...",
+                        position=2,
+                        disable=not accelerator.is_local_main_process,
+                    ):
+                        non_required_keys = ['speech_emb', 'emb_attention_mask']
+
+                        batch_languages = batch.pop("language", None)
+                        for key in non_required_keys:
+                            batch.pop(key, None)                        
+                        generated_audios = generate_step(batch, accelerator)
+                        # Gather all predictions and targets
+                        generated_audios, input_ids, prompts = accelerator.pad_across_processes(
+                            (generated_audios, batch["input_ids"], batch["prompt_input_ids"]), dim=1, pad_index=0
+                        )
+                        generated_audios = accelerator.gather_for_metrics(generated_audios)
+                        input_ids = accelerator.gather_for_metrics(input_ids)
+                        prompts = accelerator.gather_for_metrics(prompts)
+                        batch_languages = accelerator.gather_for_metrics(batch_languages)
+
+                        gen_preds.extend(generated_audios.to("cpu"))
+                        gen_descriptions.extend(input_ids.to("cpu"))
+                        gen_prompts.extend(prompts.to("cpu"))
+                        languages.extend(batch_languages)
+
+                    gen_time = time.time() - gen_start
+
+                    
+                    if accelerator.is_local_main_process:
+                        pred_descriptions = description_tokenizer.batch_decode(gen_descriptions, skip_special_tokens=True)
+                        pred_prompts = prompt_tokenizer.batch_decode(gen_prompts, skip_special_tokens=True)
+                        audios = [a.float().cpu().numpy() for a in gen_preds]
+                        # (
+                        #     gen_metrics,
+                        #     pred_descriptions,
+                        #     pred_prompts,
+                        #     audios,
+                        #     transcriptions,
+                        #     si_sdr_measures,
+                        # ) = compute_metrics(
+                        #     gen_preds,
+                        #     gen_descriptions,
+                        #     gen_prompts,
+                        #     languages,
+                        #     accelerator.device,
+                        #     training_args.compute_clap_similarity_metric,
+                        #     training_args.compute_noise_level_metric,
+                        #     training_args.noise_level_to_compute_clean_wer,
+                        # )
+                        if "wandb" in training_args.report_to:
+                            log_pred(
+                                accelerator,
                                 pred_descriptions,
                                 pred_prompts,
                                 audios,
-                                transcriptions,
-                                si_sdr_measures,
-                            ) = compute_metrics(
-                                eval_preds,
-                                eval_descriptions,
-                                eval_prompts,
-                                accelerator.device,
-                                training_args.compute_clap_similarity_metric,
-                                training_args.compute_noise_level_metric,
-                                training_args.noise_level_to_compute_clean_wer,
+                                languages,
+                                sampling_rate=sampling_rate,
+                                step=cur_step,
+                                prefix="eval",
                             )
-                            eval_metrics.update(metric_values)
-                            metrics_desc = " ".join([f"Eval {key}: {value} |" for key, value in metric_values.items()])
-                            if "wandb" in training_args.report_to:
-                                log_pred(
-                                    accelerator,
-                                    pred_descriptions,
-                                    pred_prompts,
-                                    transcriptions,
-                                    audios,
-                                    si_sdr_measures,
-                                    sampling_rate=sampling_rate,
-                                    step=cur_step,
-                                    prefix="eval",
-                                )
-                        accelerator.wait_for_everyone()
 
-                    # Print metrics and update progress bar
-                    # if accelerator.is_local_main_process:
-                    #     steps_trained_progress_bar.write(
-                    #         f"Eval results for step ({cur_step} / {total_train_steps} | Eval Loss: {eval_metrics['loss']} |"
-                    #         f" {metrics_desc})"
-                    #     )
-
-                    log_metric(
-                        accelerator,
-                        metrics=eval_metrics,
-                        train_time=eval_time,
-                        step=cur_step,
-                        epoch=epoch,
-                        prefix="eval",
-                    )
-
-                    # release eval batch and relax metrics
-                    eval_metrics, eval_preds, eval_descriptions, eval_prompts, batch, eval_metric = release_memory(
-                        eval_metrics, eval_preds, eval_descriptions, eval_prompts, batch, eval_metric
-                    )
-                    if training_args.predict_with_generate:
+                        gen_preds, gen_descriptions, gen_prompts, batch = release_memory(
+                            gen_preds, gen_descriptions, gen_prompts, batch
+                        )
                         generated_audios, input_ids, prompts = release_memory(generated_audios, input_ids, prompts)
 
+                    accelerator.wait_for_everyone()
+                    
                     # train mode
                     model.train()
 
