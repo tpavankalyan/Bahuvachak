@@ -89,6 +89,7 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
     LANGUAGES = list(data_args.eval_dataset_config_name.split('+'))
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
@@ -204,6 +205,7 @@ def main():
     )
     sampling_rate = feature_extractor.sampling_rate
 
+    # load the speaker encoder
     model_spk = Model_SPK.from_pretrained("pyannote/embedding")
     speaker_embedding_model = Inf_SPK(model_spk, window="whole")
 
@@ -251,6 +253,7 @@ def main():
             "prompt_column_name": data_args.prompt_column_name,
             "language_column_name": "language",
         }
+
         if data_args.description_column_name is not None:
             columns_to_keep["description_column_name"] = data_args.description_column_name
 
@@ -466,9 +469,11 @@ def main():
 
             #output["speaker_embeddings"] = torch.rand(len(len_audio), 512).to(batch["input_values"].device)
             speaker_embeddings = []
-            for audio in batch["input_values"]:
-                embedding = speaker_embedding_model({"waveform": audio, "sample_rate": sampling_rate})  # assuming 16kHz sampling rate
-                speaker_embeddings.append(embedding)  # Store as numpy for compatibility
+
+            with torch.no_grad():
+                for audio in batch["input_values"]:
+                    embedding = speaker_embedding_model({"waveform": audio, "sample_rate": sampling_rate})  # assuming 16kHz sampling rate
+                    speaker_embeddings.append(embedding)  # Store as numpy for compatibility
 
             # Move speaker embeddings to the correct device
             output["speaker_embeddings"] = torch.tensor(speaker_embeddings).to(batch["input_values"].device)
@@ -548,7 +553,7 @@ def main():
                         if ((cur_step + 1) % data_args.save_codec_steps == 0) or (
                             cur_step == total_inference_steps - 1
                         ):
-                            tmp_labels = Dataset.from_dict({"labels": all_generated_labels, "target_length": all_lens, "spk_emb": all_speaker_emb})
+                            tmp_labels = Dataset.from_dict({"labels": all_generated_labels, "target_length": all_lens, speech_emb_column_name: all_speaker_emb})
                             tmp_labels = tmp_labels.map(
                                 postprocess_dataset,
                                 num_proc=data_args.preprocessing_num_workers,  # this one is resource consuming if many processor.
@@ -565,7 +570,7 @@ def main():
                 accelerator.wait_for_everyone()
 
             if accelerator.is_main_process and len(all_generated_labels) > 0:
-                tmp_labels = Dataset.from_dict({"labels": all_generated_labels, "target_length": all_lens, "spk_emb": all_speaker_emb})
+                tmp_labels = Dataset.from_dict({"labels": all_generated_labels, "target_length": all_lens, speech_emb_column_name: all_speaker_emb})
                 tmp_labels = tmp_labels.map(
                     postprocess_dataset,
                     num_proc=data_args.preprocessing_num_workers,  # this one is resource consuming if many processor.

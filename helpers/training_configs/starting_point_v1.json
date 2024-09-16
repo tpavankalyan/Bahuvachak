@@ -3,15 +3,15 @@
     "save_to_disk":  "./tmp_dataset_audio/",
     "temporary_save_to_disk": "./audio_code_tmp/",
     "wandb_project": "parler-tts-50k-hours",
-    "wandb_run_name": "Mini_pretrained_all",
+    "wandb_run_name": "run_for_data_processing",
 
     "feature_extractor_name":"ylacombe/dac_44khZ_8kbps",
     "description_tokenizer_name":"google/flan-t5-large",
-    "prompt_tokenizer_name":"ai4bharat/indictrans2-en-indic-1B",
+    "prompt_tokenizer_name":"ai4bharat/indictrans2-indic-en-1B",
 
     "report_to": ["wandb"],
     "overwrite_output_dir": true,
-    "output_dir": "./output_dir_training_eng_pre_multi_ling",
+    "output_dir": "./output_for_preprocessing",
 
     "train_dataset_name": "Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak",
     "train_metadata_dataset_name": "Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak+Pavankalyan/Bahuvachak",
@@ -30,8 +30,6 @@
     "speech_emb_column_name": "spk_emb",
     "condition_on": "audio",
     "emb_dim": 512,
-
-    "max_eval_samples": 5,
     
     "max_duration_in_seconds": 30,
     "min_duration_in_seconds": 2.0,
@@ -48,10 +46,10 @@
     "gradient_accumulation_steps": 4,
     "gradient_checkpointing": false,
     "per_device_train_batch_size": 8,
-    "learning_rate": 0.00095,
+    "learning_rate": 0.0001,
     "adam_beta1": 0.9,
     "adam_beta2": 0.99,
-    "weight_decay": 0.01,
+    "weight_decay": 0.001,
 
     "lr_scheduler_type": "constant_with_warmup",
     "warmup_steps":  10000,

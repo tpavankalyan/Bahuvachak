@@ -100,8 +100,8 @@ class DataCollatorParlerTTSWithPadding:
             max_length=self.description_max_length,
         )
 
-        feature/condition_on_speech
-        batch = {"labels": labels, **input_ids, "speech_emb": speech_emb}
+
+        batch = {"labels": labels, **input_ids, "speech_emb": speech_emb, "language":languages}
         batch["emb_attention_mask"] = torch.ones(speech_emb.shape[0], n)
 
 
